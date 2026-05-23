@@ -1,74 +1,110 @@
+import requests
 from fastapi import FastAPI
 from pydantic import BaseModel
-from datetime import datetime
+from datetime import datetime, timedelta
 
 app = FastAPI()
 
-# 술 종류별 알코올 도수 및 1잔당 용량(ml) 기준 데이터베이스
+# 서울시 오픈 API 인증키를 여기에 입력하세요 (샘플 키: "sample")
+# 발급받으신 진짜 키를 따옴표 안에 넣으시면 됩니다.
+SEOUL_API_KEY = "sample" 
+
 DRINK_DATA = {
-    "soju": {"abv": 0.165, "volume_per_glass": 50},    # 소주 (16.5%, 1잔 50ml)
-    "beer": {"abv": 0.045, "volume_per_glass": 355},   # 맥주 (4.5%, 1캔/잔 355ml)
-    "makgeolli": {"abv": 0.06, "volume_per_glass": 150}, # 막걸리 (6%, 1잔 150ml)
-    "highball": {"abv": 0.08, "volume_per_glass": 350}  # 하이볼 (8%, 1잔 350m)
+    "soju": {"abv": 0.165, "volume_per_glass": 50},
+    "beer": {"abv": 0.045, "volume_per_glass": 355},
+    "makgeolli": {"abv": 0.06, "volume_per_glass": 150},
+    "highball": {"abv": 0.08, "volume_per_glass": 350}
 }
 
-# 사용자로부터 받을 데이터 양식 정의
 class DrinkingSession(BaseModel):
-    weight: float          # 체중 (kg)
-    gender: str            # 성별 ("male" 또는 "female")
-    drink_type: str        # 술 종류 ("soju", "beer", "makgeolli", "highball")
-    glasses: int           # 마신 잔(또는 병/캔) 수
-    start_time: str        # 음주 시작 시간 (형식: "YYYY-MM-DD HH:MM")
+    weight: float
+    gender: str
+    drink_type: str
+    glasses: int
+    start_time: str
+    station_name: str       # 사용자가 타야 하는 역 이름 (예: "서울", "홍대입구")
+    normal_walk_minutes: int # 평소 역까지 걸어가는 시간 (분)
 
-@app.get("/")
-def read_root():
-    return {"message": "술자리 귀가 메이트 서버가 정상 작동 중입니다!"}
-
-@app.post("/calculate_real_bac")
-def calculate_real_bac(session: DrinkingSession):
-    # 1. 술 종류 변환 및 총 알코올 양(g) 계산
-    # 알코올 질량(g) = 음주량(ml) * (도수/100) * 알코올 비중(0.7894)
+@app.post("/calculate_real_goldentime")
+def calculate_real_goldentime(session: DrinkingSession):
+    # 1. 위드마크 알코올 계산 및 도보 속도 가중치 산출
     drink = DRINK_DATA.get(session.drink_type.lower())
     if not drink:
-        return {"error": "지원하지 않는 술 종류입니다. (soju, beer, makgeolli, highball 중 선택)"}
+        return {"error": "지원하지 않는 술 종류입니다."}
     
     total_volume = drink["volume_per_glass"] * session.glasses
     alcohol_g = total_volume * drink["abv"] * 0.7894
     
-    # 2. 위드마크 기본 공식 적용 (성별 계수: 남 0.86, 여 0.64)
     r = 0.86 if session.gender.lower() == "male" else 0.64
     base_bac = alcohol_g / (session.weight * r * 10)
     
-    # 3. 시간 경과에 따른 알코올 분해 반영 (-0.015% / 시간)
-    try:
-        start_dt = datetime.strptime(session.start_time, "%Y-%m-%d %H:%M")
-        current_dt = datetime.now()
-        elapsed_hours = (current_dt - start_dt).total_seconds() / 3600
-    except ValueError:
-        return {"error": "시간 형식이 올바르지 않습니다. 'YYYY-MM-DD HH:MM' 형식으로 입력해주세요."}
+    start_dt = datetime.strptime(session.start_time, "%Y-%m-%d %H:%M")
+    current_dt = datetime.now()
+    elapsed_hours = (current_dt - start_dt).total_seconds() / 3600
+    current_bac = max(0.0, base_bac - (elapsed_hours * 0.015))
     
-    # 경과 시간만큼 알코올 감소 (음수가 되지 않도록 대조)
-    bac_reduction = elapsed_hours * 0.015
-    current_bac = max(0.0, base_bac - bac_reduction)
-    
-    # 4. 혈중알코올농도에 따른 '보행 속도 가중치' 도출
-    # 정상 보행 속도를 1.0이라고 했을 때, 취할수록 느려지는 비율
     if current_bac >= 0.08:
-        walking_speed_factor = 0.7  # 평소보다 30% 느리게 걸음 (만취)
-        status = "만취 상태 (인사불성, 즉시 귀가 필요)"
+        walking_speed_factor = 0.7   # 만취: 30% 느려짐
+        status = "만취 상태"
     elif current_bac >= 0.03:
-        walking_speed_factor = 0.85 # 평소보다 15% 느리게 걸음 (취기)
-        status = "면허 정지 수준 (판단력 저하 시작)"
+        walking_speed_factor = 0.85  # 취기: 15% 느려짐
+        status = "취기 상태"
     else:
-        walking_speed_factor = 1.0  # 정상 속도
-        status = "정상 또는 경미한 취기"
+        walking_speed_factor = 1.0   # 정상
+        status = "정상 상태"
+
+    # 취기 반영 실제 소요 도보 시간 계산
+    real_walk_minutes = round(session.normal_walk_minutes / walking_speed_factor)
+
+    # 2. [핵심] 진짜 서울시 공공데이터 API 호출하기 (json 형태로 요청)
+    # 호출 주소 양식: http://swopenapi.seoul.go.kr/api/subway/{인증키}/json/realtimeStationArrival/0/20/{역이름}
+    url = f"http://swopenapi.seoul.go.kr/api/subway/{SEOUL_API_KEY}/json/realtimeStationArrival/0/20/{session.station_name}"
+    
+    last_train_info = None
+    try:
+        response = requests.get(url)
+        data = response.json()
+        
+        # 서울시가 준 데이터 리스트를 돌면서 막차(lstcarAt가 "1"이거나 trainLineNm에 "막차"가 들어간 것) 찾기
+        if "realtimeArrivalList" in data:
+            for train in data["realtimeArrivalList"]:
+                if train.get("lstcarAt") == "1" or "막차" in train.get("trainLineNm", ""):
+                    # 데이터 수집 시간(recptnDt)에서 시/분 알아내기 (실제 막차 고정 시간 대용)
+                    # 실제 서비스 시에는 통계 데이터나 도착 예정 정보를 매칭하게 고도화합니다.
+                    recptn_time = train.get("recptnDt", "23:50:00") # 예: "2026-05-23 23:41:45"
+                    time_part = recptn_time.split(" ")[1] # "23:41:45"
+                    last_train_time_str = ":".join(time_part.split(":")[:2]) # "23:41"
+                    
+                    last_train_info = {
+                        "line": train.get("trainLineNm"),
+                        "time": last_train_time_str
+                    }
+                    break # 첫 번째로 찾은 막차 정보를 기준으로 계산
+    except Exception as e:
+        return {"error": f"공공데이터 API 호출 중 에러 발생: {str(e)}"}
+
+    # 만약 현재 운행 중인 막차가 없다면 가상의 표준 막차 시간(23:45)으로 안전장치 설정
+    if not last_train_info:
+        last_train_info = {
+            "line": "정보를 불러올 수 없어 가상 매칭된 막차",
+            "time": "23:45"
+        }
+
+    # 3. 막차 시간 기준 골든타임 역산
+    today_str = current_dt.strftime("%Y-%m-%d")
+    last_train_dt = datetime.strptime(f"{today_str} {last_train_info['time']}", "%Y-%m-%d %H:%M")
+    
+    # 골든타임 = 막차 시간 - 실제 도보 분 - 완충 시간(3분)
+    golden_time_dt = last_train_dt - timedelta(minutes=real_walk_minutes + 3)
+    time_left_minutes = round((golden_time_dt - current_dt).total_seconds() / 60)
 
     return {
-        "음주 시작 시간": session.start_time,
-        "현재 시간": current_dt.strftime("%Y-%m-%d %H:%M"),
-        "술자리 경과 시간(시간)": round(elapsed_hours, 1),
-        "총 섭취한 알코올(g)": round(alcohol_g, 2),
-        "현재 예상 혈중알코올농도(BAC)": round(current_bac, 4),
-        "상태 상태": status,
-        "추천 반영 보행 속도 비율": walking_speed_factor
+        "현재 혈중알코올농도(BAC)": round(current_bac, 4),
+        "현재 상태": status,
+        "검색한 지하철역": session.station_name,
+        "조회된 실시간 막차 노선": last_train_info["line"],
+        "해당 막차 시간": last_train_info["time"],
+        "취기 반영 역까지 도보 시간": f"{real_walk_minutes}분 (평소보다 {round((1-walking_speed_factor)*100)}% 지연됨)",
+        "술자리에서 일어나야 하는 골든타임": golden_time_dt.strftime("%H:%M"),
+        "골든타임까지 남은 시간": f"{time_left_minutes}분 남음" if time_left_minutes > 0 else "이미 막차 골든타임이 지났습니다. 주변 숙소나 택시를 검색하세요!"
     }
