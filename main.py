@@ -51,7 +51,7 @@ def calculate_real_bac(session: DrinkingSession):
     bac_reduction = elapsed_hours * 0.015
     current_bac = max(0.0, base_bac - bac_reduction)
     
-    # 4. 혈중알코올농도에 따른 '보행 속도 가중치' 도출 (팀의 핵심 아이디어!)
+    # 4. 혈중알코올농도에 따른 '보행 속도 가중치' 도출
     # 정상 보행 속도를 1.0이라고 했을 때, 취할수록 느려지는 비율
     if current_bac >= 0.08:
         walking_speed_factor = 0.7  # 평소보다 30% 느리게 걸음 (만취)
