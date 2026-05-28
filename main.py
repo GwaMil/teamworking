@@ -7,7 +7,7 @@ app = FastAPI()
 
 # 서울시 오픈 API 인증키를 여기에 입력하세요 (샘플 키: "sample")
 # 발급받으신 진짜 키를 따옴표 안에 넣으시면 됩니다.
-SEOUL_API_KEY = "sample" 
+SEOUL_API_KEY = "5941534e666475623630496b78736d" 
 
 DRINK_DATA = {
     "soju": {"abv": 0.165, "volume_per_glass": 50},
@@ -58,7 +58,7 @@ def calculate_real_goldentime(session: DrinkingSession):
 
     # 2. [핵심] 진짜 서울시 공공데이터 API 호출하기 (json 형태로 요청)
     # 호출 주소 양식: http://swopenapi.seoul.go.kr/api/subway/{인증키}/json/realtimeStationArrival/0/20/{역이름}
-    url = f"http://swopenapi.seoul.go.kr/api/subway/{5941534e666475623630496b78736d}/json/realtimeStationArrival/0/20/{session.station_name}"
+    url = f"http://swopenapi.seoul.go.kr/api/subway/{SEOUL_API_KEY}/json/realtimeStationArrival/0/20/{session.station_name}"
     
     last_train_info = None
     try:
